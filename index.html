@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Quantum Trading</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+ <div class="l">
+  <div class="brand">⚡ QUANTUM</div>
+  <button class="hb" id="bAdd">+ Ativo (digite)</button>
+  <span class="badge" id="mb">Simulação</span>
+  <span class="badge" id="mt5Badge" style="background:#dc2626">MT5 Desconectado</span>
+ </div>
+ <div class="r" id="oh"><span>A:<b id="vo">-</b></span><span>Máx:<b id="vh">-</b></span><span>Mín:<b id="vl">-</b></span><span>Fech:<b id="vc">-</b></span></div>
+</header>
+<main>
+ <div class="chart-tools">
+  <button class="tool-btn active" id="tCursor" title="Cursor Seta">↗</button>
+  <button class="tool-btn" id="tHand" title="Mãozinha (Ctrl)">✋</button>
+  <button class="tool-btn" id="tCross" title="Cursor Cruz">┼</button>
+  <button class="tool-btn" id="tRuler" title="Régua">📏</button>
+  <button class="tool-btn" id="tFibo" title="Fibonacci">📊</button>
+ </div>
+
+ <div id="grid"></div>
+
+ <aside id="side">
+  <div><label>Conta</label><select id="mode"><option value="sim">Simulação (local)</option><option value="real">Conta MT5</option></select></div>
+  <input type="checkbox" id="cf" checked style="display:none">
+  
+  <div class="symt" id="sSym">—</div>
+  
+  <div>
+   <label>Quantidade (lotes)</label><input type="text" id="lot" value="1">
+   <div class="q" id="lotButtonsContainer">
+    <button data-l="0.01">0.01</button>
+    <button data-l="0.1">0.1</button>
+    <button data-l="1">1</button>
+    <button data-l="5">5</button>
+    <button data-l="10">10</button>
+   </div>
+  </div>
+  <div><label>Tipo de ordem</label><select id="ot"><option value="m">A mercado</option><option value="l">Limite</option></select>
+   <input type="number" id="lpx" step="any" style="display:none;margin-top:4px" placeholder="Preço limite"></div>
+  <div class="g2"><button class="buy" id="bBuy">Comprar</button><button class="sell" id="bSell">Vender</button></div>
+  <div class="g2"><button class="gr" id="bCan">Cancel. Ord.</button><button class="gr" id="bRev">Inverter</button></div>
+  <button class="z1" id="bZ">Zerar</button><button class="z2" id="bZC">Cancelar ordens + Zerar</button>
+  
+  <div class="res">
+   <div><span>Posição</span><b id="posBox">ZERADO</b></div>
+   <div><span>Preço médio</span><b id="rAvg">-</b></div>
+   <div><span>Res. aberto (ativo)</span><b id="rOp">R$ 0,00</b></div>
+   <div><span>Res. realizado</span><b id="rDia">R$ 0,00</b></div>
+   <div class="t"><span style="color:#f3f4f6;font-weight:700">Total conta</span><b id="rTot">R$ 0,00</b></div>
+  </div>
+  <div><label>Posições abertas</label><div id="pt"></div></div>
+ </aside>
+</main>
+<div id="tg"></div>
+<div id="so"><h4>Buscar ativo · Enter troca o gráfico ativo · Shift+Enter abre novo</h4><input id="si" autocomplete="off" placeholder="EX: WDOX26XX, WINZ26XX"><div id="sr"></div></div>
+<div id="tfo">Periodicidade: <span id="tft"></span> min</div>
+
+<!-- MENU DE CONTEXTO -->
+<div id="ctxMenu" class="context-menu">
+ <div id="ctxSettings">⚙ Configurações do Gráfico</div>
+ <div id="ctxIndicators" style="margin-top:4px; border-top:1px solid #1e293b; padding-top:4px; cursor:pointer;">📊 Indicadores & Automações</div>
+ <div id="ctxLots" style="margin-top:4px; border-top:1px solid #1e293b; padding-top:4px; cursor:pointer;">💰 Configurar Lotes Rápidos</div>
+</div>
+
+<!-- MODAL DE CONFIGURAÇÕES DO GRÁFICO -->
+<div id="settingsModal" class="modal-overlay">
+ <div class="modal-box">
+  <h3>Configurações do Gráfico</h3>
+  <div class="modal-row"><label>Cor de Fundo</label><input type="color" id="cfgBgColor" value="#0b0f19"></div>
+  <div class="modal-row"><label>Cor Candle Alta</label><input type="color" id="cfgUpColor" value="#14b8a6"></div>
+  <div class="modal-row"><label>Cor Candle Baixa</label><input type="color" id="cfgDnColor" value="#f43f5e"></div>
+  <div class="modal-row checkbox-row"><input type="checkbox" id="cfgWatermark" checked><label for="cfgWatermark">Marca d'água</label></div>
+  <div class="modal-row checkbox-row"><input type="checkbox" id="cfgVwap" checked><label for="cfgVwap">Exibir VWAP</label></div>
+  <div class="modal-row checkbox-row"><input type="checkbox" id="cfg2MM" checked><label for="cfg2MM">Exibir 2MM (MAs 9 e 21)</label></div>
+  <div class="modal-row"><label>Cor da Marca d'água</label><input type="color" id="cfgWatermarkColor" value="#94a3b8"></div>
+  <div class="modal-row" style="flex-direction:column; align-items:stretch; gap:4px;">
+   <div style="display:flex; justify-content:space-between;"><label>Opacidade</label><span id="cfgOpacityVal" style="font-size:10px; color:var(--mu);">0.05</span></div>
+   <input type="range" id="cfgWatermarkOpacity" min="0.01" max="1" step="0.01" value="0.05">
+  </div>
+  <div class="modal-buttons" style="display:flex; gap:6px; justify-content:flex-end; margin-top:10px;">
+   <button class="gr" id="cfgCancel" style="background:#374151;">Cancelar</button>
+   <button class="gr" id="cfgApply" style="background:#1e293b; border:1px solid #334155;">Aplicar</button>
+   <button class="buy" id="cfgOk" style="background:#2563eb;">OK</button>
+  </div>
+ </div>
+</div>
+
+<!-- MODAL DE LOTES -->
+<div id="lotsModal" class="modal-overlay">
+ <div class="modal-box">
+  <h3>Configurar Lotes Rápidos</h3>
+  <div class="modal-row" style="flex-direction:column; align-items:stretch; gap:6px;">
+   <label>Valores (separados por vírgula):</label>
+   <input type="text" id="cfgLotsInput" value="0.01, 0.1, 1, 5, 10" style="padding:6px; background:#0b0f19; border:1px solid #334155; color:#fff; border-radius:4px;">
+  </div>
+  <div class="modal-buttons" style="display:flex; gap:6px; justify-content:flex-end; margin-top:12px;">
+   <button class="gr" id="lotsCancel" style="background:#374151;">Cancelar</button>
+   <button class="buy" id="lotsOk" style="background:#2563eb;">Salvar</button>
+  </div>
+ </div>
+</div>
+
+<!-- MODAL DE INDICADORES & AUTOMAÇÕES (COM ABAS) -->
+<div id="indicatorsModal" class="modal-overlay">
+ <div class="modal-box" style="width: 450px;">
+  <div style="display: flex; border-bottom: 1px solid #334155; margin-bottom: 12px;">
+   <button class="modal-tab-btn active" onclick="switchModalTab(event, 'tabIndicators')" style="flex: 1; padding: 8px; background: none; border: none; color: #fff; font-weight: bold; cursor: pointer; border-bottom: 2px solid #2563eb;">📊 Indicadores</button>
+   <button class="modal-tab-btn" onclick="switchModalTab(event, 'tabAutomations')" style="flex: 1; padding: 8px; background: none; border: none; color: #94a3b8; font-weight: bold; cursor: pointer; border-bottom: 2px solid transparent;">🤖 Automações</button>
+  </div>
+
+  <!-- ABA 1: INDICADORES -->
+  <div id="tabIndicators" class="modal-tab-content">
+   <h3>Gerenciar Indicadores</h3>
+   <div class="modal-row checkbox-row">
+    <input type="checkbox" id="indVwap" checked>
+    <label for="indVwap">VWAP (Volume Weighted Average Price)</label>
+   </div>
+   <div class="modal-row" style="flex-direction:column; align-items:stretch; gap:4px; padding-left:22px;">
+    <label>Período de Cálculo da VWAP:</label>
+    <select id="indVwapPeriod" style="background:#0b0f19; border:1px solid #334155; color:#fff; padding:5px; border-radius:4px;">
+     <option value="diaria">Diária</option>
+     <option value="semanal">Semanal</option>
+     <option value="mensal">Mensal</option>
+    </select>
+   </div>
+   <div class="modal-row checkbox-row" style="margin-top:8px;">
+    <input type="checkbox" id="ind2MM" checked>
+    <label for="ind2MM">2MM (Médias Móveis 9 e 21)</label>
+   </div>
+  </div>
+
+  <!-- ABA 2: AUTOMAÇÕES & ROBÔS -->
+  <div id="tabAutomations" class="modal-tab-content" style="display: none;">
+   <h3>Criar & Importar Automações</h3>
+   <div class="modal-row" style="flex-direction:column; align-items:stretch; gap:6px; margin-top:8px;">
+    <label>Importar Script / Estratégia (.py / .mq5):</label>
+    <input type="file" id="autoFileImport" style="background:#0b0f19; border:1px solid #334155; color:#fff; padding:6px; border-radius:4px; font-size: 11px;">
+   </div>
+   <div class="modal-row" style="flex-direction:column; align-items:stretch; gap:6px; margin-top:8px;">
+    <label>Regras da Automação (Editor / Lógica):</label>
+    <textarea id="autoScriptCode" placeholder="// Ex: Se cruzamento de médias, enviar ordem..." style="background:#0b0f19; border:1px solid #334155; color:#fff; padding:8px; border-radius:4px; height: 90px; font-family: monospace; font-size: 11px; resize: none;"></textarea>
+   </div>
+   <div class="modal-row" style="margin-top: 6px;">
+    <button class="buy" id="autoSaveBtn" style="background:#059669; width: 100%; padding: 6px;">Salvar & Executar Automação</button>
+   </div>
+  </div>
+
+  <div class="modal-buttons" style="display:flex; gap:6px; justify-content:flex-end; margin-top:16px; border-top: 1px solid #334155; padding-top: 10px;">
+   <button class="gr" id="indCancel" style="background:#374151;">Cancelar</button>
+   <button class="buy" id="indInsert" style="background:#2563eb;">Salvar & Aplicar</button>
+  </div>
+ </div>
+</div>
+
+<script src="indicators.js"></script>
+<script src="app.js"></script>
+<script src="dock.js"></script>
+<script src="ordens.js"></script>
+</body>
+</html>

@@ -1,0 +1,868 @@
+const $=id=>document.getElementById(id);
+
+const SYMS = {};
+const px = {};
+const ACC = {sim:{pos:{},ord:[],rl:0},real:{pos:{},ord:[],rl:0}};
+let mode='sim', panes=[], act=null, newMode=false, ws=null;
+let activeTool = 'cursor';
+
+const CHART_CONFIG = {
+ bg: '#0b0f19',
+ colorUp: '#14b8a6',
+ colorDn: '#f43f5e',
+ watermark: true,
+ watermarkColor: '#94a3b8',
+ watermarkOpacity: 0.05,
+ showVwap: true,
+ show2MM: true,
+ vwapPeriod: 'diaria'
+};
+
+let tempConfig = {};
+
+function ensureSymbol(code) {
+ code = code.toUpperCase().trim();
+ if (!code) return null;
+ if (!SYMS[code]) {
+  const isDol = code.includes('WDO') || code.includes('DOL');
+  const isWin = code.includes('WIN');
+  SYMS[code] = {
+   n: code,
+   b: isWin ? 128500 : (isDol ? 5420 : 100),
+   pv: isWin ? 0.2 : (isDol ? 10 : 1),
+   tk: isWin ? 5 : (isDol ? 0.5 : 0.01),
+   d: isWin ? 0 : (isDol ? 1 : 2)
+  };
+  px[code] = SYMS[code].b;
+ }
+ return code;
+}
+
+const A=()=>ACC[mode];
+const fp=(s,v)=>v?v.toFixed(SYMS[s] ? SYMS[s].d : 2):'-';
+var CUR='R$';const money=v=>(v<0?'-':'')+CUR+' '+Math.abs(v).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+const rnd=(s,v)=>Math.round(v/(SYMS[s]?SYMS[s].tk:1))*(SYMS[s]?SYMS[s].tk:1);
+function toast(m){const t=$('tg');if(t){t.textContent=m;t.style.display='block';clearTimeout(t._t);t._t=setTimeout(()=>t.style.display='none',3000)}}
+
+function hist(s,tf){
+ const basePx = SYMS[s] ? SYMS[s].b : 100;
+ let p = px[s] || basePx, v = basePx * 0.0012 * Math.sqrt(tf), a = [], t = Math.floor(Date.now() / (tf * 6e4)) * tf * 6e4;
+ for(let i=0;i<1000;i++){
+  const c=p, o=c-(Math.random()-.5)*v;
+  a.unshift({
+   t: t - i * tf * 6e4,
+   o: o,
+   h: Math.max(o, c) + Math.random() * v * .4,
+   l: Math.min(o, c) - Math.random() * v * .4,
+   c: c,
+   v: Math.floor(Math.random() * 500 + 50)
+  });
+  p = o;
+ }
+ return a;
+}
+
+function addPane(sym,tf=5){
+ sym = ensureSymbol(sym);
+ if(!sym) return;
+ if(panes.length>=4)return toast('Máximo de 4 gráficos no ecrã');
+ const el=document.createElement('div');el.className='pane';
+ el.innerHTML='<div class="ph"><b></b><span class="tf"></span><span class="chip"></span><i>✕</i></div><div class="cw"><canvas></canvas></div><button class="to-front-btn" title="Ir para o candle atual (>>)">≫</button>';
+ $('grid').appendChild(el);
+ 
+ const p={
+  el, cv:el.querySelector('canvas'), sym, tf, cs:hist(sym,tf), z:9, off:0, my:null, 
+  isMouseDown:false, isPanning:false, isScalingPrice:false,
+  panStartX:0, panStartY:0, scaleStartY:0,
+  priceZoom:1, priceOffset:0,
+  rulerStart:null, rulerCurrent:null,
+  fiboStart:null, fiboCurrent:null
+ };
+ panes.push(p);
+
+ if(ws && ws.readyState === 1) {
+  ws.send(JSON.stringify({action: 'get_history', symbol: sym, tf: tf}));
+ }
+
+ el.querySelector('.to-front-btn').onclick = () => {
+  p.off = 0;
+  p.priceOffset = 0;
+  p.priceZoom = 1;
+  draw(p);
+  toast(`Gráfico centralizado no preço atual (${p.sym})`);
+ };
+
+ el.addEventListener('mousedown',()=>setAct(p));
+ el.querySelector('i').onclick=e=>{e.stopPropagation();rmPane(p)};
+ 
+ p.cv.addEventListener('contextmenu', e => {
+  e.preventDefault();
+  setAct(p);
+  const menu = $('ctxMenu');
+  if(menu) {
+   menu.style.display = 'block';
+   menu.style.left = `${e.clientX}px`;
+   menu.style.top = `${e.clientY}px`;
+  }
+ });
+
+ p.cv.addEventListener('wheel',e=>{e.preventDefault();p.z=Math.max(3,Math.min(30,p.z+(e.deltaY<0?1:-1)));draw(p)},{passive:false});
+ 
+ p.cv.addEventListener('mousedown',e=>{
+  if (e.button !== 0) return;
+  const rect = p.cv.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+  const cw = p.cv.clientWidth - 66;
+
+  p.isMouseDown = true;
+
+  if (x >= cw) {
+   p.isScalingPrice = true;
+   p.scaleStartY = e.clientY;
+   return;
+  }
+
+  if (activeTool === 'hand') {
+   p.isPanning = true;
+   p.panStartX = e.clientX;
+   p.panStartY = e.clientY;
+   p.cv.style.cursor = 'grabbing';
+  } 
+  else if (activeTool === 'fibo') {
+   p.fiboStart = {x, y};
+   p.fiboCurrent = {x, y};
+  } 
+  else {
+   p.rulerStart = {x, y};
+   p.rulerCurrent = {x, y};
+  }
+ });
+
+ p.cv.addEventListener('mousemove',e=>{
+  const rect = p.cv.getBoundingClientRect();
+  p.my = e.clientY - rect.top;
+
+  if (p.isScalingPrice) {
+   const deltaY = e.clientY - p.scaleStartY;
+   p.priceZoom = Math.max(0.2, Math.min(6.0, p.priceZoom - deltaY * 0.008));
+   p.scaleStartY = e.clientY;
+   draw(p);
+   return;
+  }
+
+  if (p.isPanning && p.isMouseDown) {
+   const deltaX = e.clientX - p.panStartX;
+   const deltaY = e.clientY - p.panStartY;
+
+   if (Math.abs(deltaX) > 2) {
+    const d = Math.round(deltaX / p.z);
+    if(d !== 0){
+     p.off = Math.max(-50, Math.min(p.cs.length - 10, p.off + d));
+     p.panStartX = e.clientX;
+    }
+   }
+
+   if (Math.abs(deltaY) > 2) {
+    const range = p.currentPriceRange || 1000;
+    p.priceOffset += deltaY * (range / p.cv.clientHeight);
+    p.panStartY = e.clientY;
+   }
+  } 
+  else if (p.rulerStart && p.isMouseDown) {
+   p.rulerCurrent = {x: e.clientX - rect.left, y: e.clientY - rect.top};
+  } else if (p.fiboStart && p.isMouseDown) {
+   p.fiboCurrent = {x: e.clientX - rect.left, y: e.clientY - rect.top};
+  }
+  
+  draw(p);
+ });
+
+ const endInteraction = (p) => {
+  p.isMouseDown = false;
+  p.isPanning = false;
+  p.isScalingPrice = false;
+  p.rulerStart = null;
+  p.rulerCurrent = null;
+  p.fiboStart = null;
+  p.fiboCurrent = null;
+  p.cv.style.cursor = activeTool === 'hand' ? 'grab' : (activeTool === 'cross' ? 'crosshair' : 'default');
+ };
+
+ p.cv.addEventListener('mouseup', e => endInteraction(p));
+ p.cv.addEventListener('mouseleave', () => { 
+  p.my = null; 
+  endInteraction(p); 
+  draw(p); 
+ });
+
+ layout();setAct(p);
+}
+
+window.addEventListener('click', () => {
+ const m = $('ctxMenu');
+ if(m) m.style.display = 'none';
+});
+
+// Gestão de Abas do Modal
+function switchModalTab(evt, tabId) {
+ const contents = document.querySelectorAll('.modal-tab-content');
+ contents.forEach(c => c.style.display = 'none');
+
+ const buttons = document.querySelectorAll('.modal-tab-btn');
+ buttons.forEach(b => {
+  b.style.color = '#94a3b8';
+  b.style.borderBottomColor = 'transparent';
+ });
+
+ document.getElementById(tabId).style.display = 'block';
+ evt.currentTarget.style.color = '#fff';
+ evt.currentTarget.style.borderBottomColor = '#2563eb';
+}
+
+const autoSaveBtn = $('autoSaveBtn');
+if(autoSaveBtn) {
+ autoSaveBtn.onclick = () => {
+  const fileInput = $('autoFileImport');
+  let fileName = fileInput.files.length > 0 ? fileInput.files[0].name : 'Script personalizado';
+  toast(`Automação "${fileName}" salva e executada com sucesso!`);
+  $('indicatorsModal').style.display = 'none';
+ };
+}
+
+const ctxIndicators = $('ctxIndicators');
+if(ctxIndicators) {
+ ctxIndicators.onclick = (e) => {
+  e.stopPropagation();
+  $('ctxMenu').style.display = 'none';
+  $('indVwap').checked = CHART_CONFIG.showVwap;
+  $('ind2MM').checked = CHART_CONFIG.show2MM;
+  if($('indVwapPeriod')) $('indVwapPeriod').value = CHART_CONFIG.vwapPeriod || 'diaria';
+  $('indicatorsModal').style.display = 'flex';
+ };
+}
+
+const indCancel = $('indCancel');
+if(indCancel) {
+ indCancel.onclick = () => {
+  $('indicatorsModal').style.display = 'none';
+ };
+}
+
+const indInsert = $('indInsert');
+if(indInsert) {
+ indInsert.onclick = () => {
+  CHART_CONFIG.showVwap = $('indVwap').checked;
+  CHART_CONFIG.show2MM = $('ind2MM').checked;
+  if($('indVwapPeriod')) CHART_CONFIG.vwapPeriod = $('indVwapPeriod').value;
+  $('indicatorsModal').style.display = 'none';
+  drawAll();
+  toast('Configurações aplicadas com sucesso!');
+ };
+}
+
+const ctxSettings = $('ctxSettings');
+if(ctxSettings) {
+ ctxSettings.onclick = () => {
+  tempConfig = {...CHART_CONFIG};
+  $('cfgBgColor').value = CHART_CONFIG.bg;
+  $('cfgUpColor').value = CHART_CONFIG.colorUp;
+  $('cfgDnColor').value = CHART_CONFIG.colorDn;
+  $('cfgWatermark').checked = CHART_CONFIG.watermark;
+  $('cfgWatermarkColor').value = CHART_CONFIG.watermarkColor;
+  $('cfgWatermarkOpacity').value = CHART_CONFIG.watermarkOpacity;
+  $('cfgOpacityVal').textContent = CHART_CONFIG.watermarkOpacity;
+  $('settingsModal').style.display = 'flex';
+ };
+}
+
+const ctxLots = $('ctxLots');
+if(ctxLots) {
+ ctxLots.onclick = () => {
+  const currentLots = [...document.querySelectorAll('#lotButtonsContainer button')].map(b => b.dataset.l).join(', ');
+  $('cfgLotsInput').value = currentLots;
+  $('lotsModal').style.display = 'flex';
+ };
+}
+
+const lotsCancel = $('lotsCancel');
+if(lotsCancel) lotsCancel.onclick = () => { $('lotsModal').style.display = 'none'; };
+
+const lotsOk = $('lotsOk');
+if(lotsOk) lotsOk.onclick = () => {
+ const valStr = $('cfgLotsInput').value;
+ const lotsArr = valStr.split(',').map(s => s.trim()).filter(s => s !== '' && !isNaN(parseFloat(s)));
+ if(lotsArr.length === 0) return toast('Informe ao menos um valor válido de lote.');
+ 
+ const container = $('lotButtonsContainer');
+ container.innerHTML = '';
+ lotsArr.forEach(l => {
+  const btn = document.createElement('button');
+  btn.dataset.l = l;
+  btn.textContent = l;
+  btn.onclick = () => $('lot').value = l;
+  container.appendChild(btn);
+ });
+
+ $('lotsModal').style.display = 'none';
+ toast('Lotes rápidos atualizados com sucesso!');
+};
+
+function bindLotButtons() {
+ document.querySelectorAll('#lotButtonsContainer button').forEach(b => {
+  b.onclick = () => $('lot').value = b.dataset.l;
+ });
+}
+bindLotButtons();
+
+const cfgOpacity = $('cfgWatermarkOpacity');
+if(cfgOpacity) {
+ cfgOpacity.oninput = (e) => {
+  $('cfgOpacityVal').textContent = e.target.value;
+ };
+}
+
+function applyConfig() {
+ CHART_CONFIG.bg = $('cfgBgColor').value;
+ CHART_CONFIG.colorUp = $('cfgUpColor').value;
+ CHART_CONFIG.colorDn = $('cfgDnColor').value;
+ CHART_CONFIG.watermark = $('cfgWatermark').checked;
+ CHART_CONFIG.watermarkColor = $('cfgWatermarkColor').value;
+ CHART_CONFIG.watermarkOpacity = parseFloat($('cfgWatermarkOpacity').value);
+ drawAll();
+}
+
+const cfgApply = $('cfgApply');
+if(cfgApply) cfgApply.onclick = () => { applyConfig(); toast('Configurações aplicadas!'); };
+
+const cfgOk = $('cfgOk');
+if(cfgOk) cfgOk.onclick = () => { applyConfig(); $('settingsModal').style.display = 'none'; toast('Configurações salvas!'); };
+
+const cfgCancel = $('cfgCancel');
+if(cfgCancel) cfgCancel.onclick = () => { Object.assign(CHART_CONFIG, tempConfig); drawAll(); $('settingsModal').style.display = 'none'; };
+
+function rmPane(p){if(panes.length===1)return toast('Mantenha ao menos um gráfico');
+ panes=panes.filter(x=>x!==p);p.el.remove();if(act===p)setAct(panes[0]);layout()}
+function layout(){const n=panes.length;$('grid').style.gridTemplateColumns=n>1?'1fr 1fr':'1fr';
+ $('grid').style.gridTemplateRows=n>2?'1fr 1fr':'1fr';requestAnimationFrame(drawAll)}
+function setAct(p){act=p;panes.forEach(x=>x.el.classList.toggle('act',x===p));
+ if(document.activeElement!==$('lpx'))$('lpx').value=fp(p.sym,px[p.sym]);ui();drawAll()}
+
+function setSym(p,s){
+ s = ensureSymbol(s); 
+ if(!s) return;
+ p.sym=s; 
+ p.cs=hist(s,p.tf); 
+ p.off=0; 
+ setAct(p);
+ if(ws && ws.readyState === 1) ws.send(JSON.stringify({action: 'get_history', symbol: s, tf: p.tf}));
+}
+
+function setTf(p,tf){
+ p.tf=tf; 
+ p.cs=hist(p.sym,tf); 
+ p.off=0; 
+ drawAll(); 
+ ui();
+ if(ws && ws.readyState === 1) ws.send(JSON.stringify({action: 'get_history', symbol: p.sym, tf: tf}));
+}
+
+function tag(g,x,y,t,col){g.font='bold 11px sans-serif';const w=g.measureText(t).width+12;g.fillStyle=col;g.fillRect(x,y-9,w,18);g.fillStyle='#fff';g.textBaseline='middle';g.textAlign='left';g.fillText(t,x+6,y);return w}
+
+function draw(p){
+ const c=p.cv,W=c.clientWidth,H=c.clientHeight,dpr=devicePixelRatio||1;if(!W||!H)return;
+ if(c.width!==Math.round(W*dpr)||c.height!==Math.round(H*dpr)){c.width=Math.round(W*dpr);c.height=Math.round(H*dpr)}
+ const g=c.getContext('2d');g.setTransform(dpr,0,0,dpr,0,0);
+ 
+ g.fillStyle = CHART_CONFIG.bg;
+ g.fillRect(0, 0, W, H);
+
+ const AX=66,BY=18,cw=W-AX,ch=H-BY,z=p.z,n=Math.floor(cw/z),e=p.cs.length-p.off,s0=Math.max(0,e-n),vis=p.cs.slice(s0,e);if(!vis.length)return;
+ 
+ let hi=-1e9,lo=1e9;vis.forEach(k=>{hi=Math.max(hi,k.h);lo=Math.min(lo,k.l)});
+ let pad=(hi-lo)*.1||1;hi+=pad;lo-=pad;
+
+ const center = (hi + lo) / 2;
+ let span = (hi - lo) / p.priceZoom;
+ hi = center + (span / 2) + p.priceOffset;
+ lo = center - (span / 2) + p.priceOffset;
+ p.currentPriceRange = hi - lo;
+
+ const Y=v=>ch*(1-(v-lo)/(hi-lo)),cl=y=>Math.max(10,Math.min(ch-10,y));
+ 
+ if(CHART_CONFIG.watermark){
+  g.save();
+  g.font = 'bold 54px sans-serif';
+  g.globalAlpha = CHART_CONFIG.watermarkOpacity;
+  g.fillStyle = CHART_CONFIG.watermarkColor;
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.fillText(`${p.sym} - ${p.tf}M`, cw / 2, ch / 2);
+  g.restore();
+ }
+
+ try {
+  if (CHART_CONFIG.showVwap && typeof drawVWAP === 'function') {
+   drawVWAP(g, p, vis, s0, Y);
+  }
+  if (CHART_CONFIG.show2MM && typeof draw2MM === 'function') {
+   draw2MM(g, p, vis, s0, Y);
+  }
+ } catch (err) {
+  console.error("Erro ao desenhar indicadores:", err);
+ }
+
+ g.font='10px sans-serif';g.textBaseline='middle';
+ for(let i=0;i<=5;i++){const v=lo+(hi-lo)*i/5,y=Y(v);g.strokeStyle='#1e293b';g.lineWidth=1;g.beginPath();g.moveTo(0,y);g.lineTo(cw,y);g.stroke();g.fillStyle='#94a3b8';g.textAlign='left';g.fillText(fp(p.sym,v),cw+6,y)}
+ 
+ vis.forEach((k,i)=>{const x=i*z+z/2,col=k.c>=k.o?CHART_CONFIG.colorUp:CHART_CONFIG.colorDn;g.strokeStyle=g.fillStyle=col;g.lineWidth=1;
+  g.beginPath();g.moveTo(x,Y(k.h));g.lineTo(x,Y(k.l));g.stroke();
+  const bw=Math.max(1,z*.7),t=Math.min(Y(k.o),Y(k.c));g.fillRect(x-bw/2,t,bw,Math.max(1,Math.abs(Y(k.o)-Y(k.c))));
+  if(i%Math.ceil(70/z)===0){g.fillStyle='#64748b';g.textAlign='center';const d=new Date(k.t);g.fillText(String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'),x,ch+9)}});
+ 
+ const P=px[p.sym],up=vis[vis.length-1].c>=vis[vis.length-1].o,pc=up?CHART_CONFIG.colorUp:CHART_CONFIG.colorDn;
+ g.strokeStyle=pc;g.setLineDash([4,4]);g.beginPath();g.moveTo(0,Y(P));g.lineTo(cw,Y(P));g.stroke();g.setLineDash([]);
+ tag(g,cw,Y(P),fp(p.sym,P),pc);
+
+ if(activeTool === 'cross' && p.my != null && p.my < ch) {
+  g.strokeStyle = '#64748b';
+  g.setLineDash([2,2]);
+  g.beginPath();
+  g.moveTo(0, p.my); g.lineTo(cw, p.my);
+  g.stroke();
+  g.setLineDash([]);
+  tag(g, cw, p.my, fp(p.sym, lo+(hi-lo)*(1-p.my/ch)), '#334155');
+ }
+
+ if(p.isMouseDown && p.rulerStart && p.rulerCurrent && activeTool !== 'hand' && activeTool !== 'fibo') {
+  g.strokeStyle = '#38bdf8';
+  g.lineWidth = 1.5;
+  g.setLineDash([3,3]);
+  g.beginPath();
+  g.moveTo(p.rulerStart.x, p.rulerStart.y);
+  g.lineTo(p.rulerCurrent.x, p.rulerCurrent.y);
+  g.stroke();
+  g.setLineDash([]);
+
+  const p1 = lo + (hi - lo) * (1 - p.rulerStart.y / ch);
+  const p2 = lo + (hi - lo) * (1 - p.rulerCurrent.y / ch);
+  const diffPoints = p2 - p1;
+  const diffPercent = (diffPoints / p1) * 100;
+  
+  const barWidth = z;
+  const barsCount = Math.round((p.rulerCurrent.x - p.rulerStart.x) / barWidth);
+  const totalMinutes = Math.abs(barsCount) * p.tf;
+  let timeStr = totalMinutes >= 60 ? `${(totalMinutes/60).toFixed(1)} horas` : `${totalMinutes} minutos`;
+
+  const boxW = 185;
+  const boxH = 135;
+  let boxX = p.rulerCurrent.x + 15;
+  let boxY = p.rulerCurrent.y - boxH / 2;
+  if (boxX + boxW > cw) boxX = p.rulerCurrent.x - boxW - 15;
+  if (boxY < 10) boxY = 10;
+  if (boxY + boxH > ch) boxY = ch - boxH - 10;
+
+  g.fillStyle = 'rgba(15, 23, 42, 0.95)';
+  g.strokeStyle = '#3b82f6';
+  g.lineWidth = 1;
+  g.beginPath();
+  if (g.roundRect) {
+      g.roundRect(boxX, boxY, boxW, boxH, 6);
+  } else {
+      g.rect(boxX, boxY, boxW, boxH);
+  }
+  g.fill();
+  g.stroke();
+
+  g.font = '11px sans-serif';
+  g.textBaseline = 'top';
+  
+  let textY = boxY + 10;
+  const leftX = boxX + 12;
+  const rightX = boxX + boxW - 12;
+
+  g.fillStyle = '#94a3b8'; g.textAlign = 'left'; g.fillText('Variação:', leftX, textY);
+  g.fillStyle = diffPoints >= 0 ? CHART_CONFIG.colorUp : CHART_CONFIG.colorDn; g.textAlign = 'right';
+  g.fillText(`${diffPoints >= 0 ? '+' : ''}${diffPoints.toFixed(2)} pts`, rightX, textY);
+  
+  textY += 16;
+  g.fillText(`${diffPercent >= 0 ? '+' : ''}${diffPercent.toFixed(2)}%`, rightX, textY);
+
+  textY += 18;
+  g.fillStyle = '#94a3b8'; g.textAlign = 'left'; g.fillText('Diferença:', leftX, textY);
+  g.fillStyle = '#f8fafc'; g.textAlign = 'right'; g.fillText(diffPoints.toFixed(0), rightX, textY);
+
+  textY += 18;
+  g.fillStyle = '#94a3b8'; g.textAlign = 'left'; g.fillText('Ponto 1:', leftX, textY);
+  g.fillStyle = '#f8fafc'; g.textAlign = 'right'; g.fillText(fp(p.sym, p1), rightX, textY);
+
+  textY += 18;
+  g.fillStyle = '#94a3b8'; g.textAlign = 'left'; g.fillText('Ponto 2:', leftX, textY);
+  g.fillStyle = '#f8fafc'; g.textAlign = 'right'; g.fillText(fp(p.sym, p2), rightX, textY);
+
+  textY += 18;
+  g.fillStyle = '#94a3b8'; g.textAlign = 'left'; g.fillText('Intervalo:', leftX, textY);
+  g.fillStyle = '#f8fafc'; g.textAlign = 'right'; g.fillText(timeStr, rightX, textY);
+
+  textY += 18;
+  g.fillStyle = '#94a3b8'; g.textAlign = 'left'; g.fillText('Candles:', leftX, textY);
+  g.fillStyle = '#f8fafc'; g.textAlign = 'right'; g.fillText(Math.abs(barsCount).toString(), rightX, textY);
+ }
+
+ if(p.fiboStart && p.fiboCurrent && activeTool === 'fibo') {
+  const y1 = p.fiboStart.y, y2 = p.fiboCurrent.y;
+  const price1 = lo + (hi - lo) * (1 - y1 / ch);
+  const price2 = lo + (hi - lo) * (1 - y2 / ch);
+  const diff = price2 - price1;
+  const levels = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1];
+
+  levels.forEach(lvl => {
+   const targetPrice = price1 + (diff * lvl);
+   const py = Y(targetPrice);
+   if (py >= 0 && py <= ch) {
+    g.strokeStyle = '#f59e0b'; g.lineWidth = 1; g.setLineDash([2,2]);
+    g.beginPath(); g.moveTo(0, py); g.lineTo(cw, py); g.stroke(); g.setLineDash([]);
+    g.fillStyle = '#f59e0b'; g.font = '10px sans-serif'; g.textAlign = 'left';
+    g.fillText(`${(lvl * 100).toFixed(1)}% (${fp(p.sym, targetPrice)})`, 5, py - 4);
+   }
+  });
+ }
+}
+
+function drawAll(){panes.forEach(draw)}
+
+function fill(a,s,dq,price){
+ const P=a.pos[s]||(a.pos[s]={q:0,avg:0}),pv=SYMS[s]?SYMS[s].pv:1;
+ if(P.q===0||Math.sign(P.q)===Math.sign(dq)){P.avg=(P.avg*Math.abs(P.q)+price*Math.abs(dq))/(Math.abs(P.q)+Math.abs(dq));P.q+=dq}
+ else{const c=Math.min(Math.abs(P.q),Math.abs(dq));a.rl+=(price-P.avg)*Math.sign(P.q)*c*pv;const nq=P.q+dq;
+  if(nq===0||Math.sign(nq)!==Math.sign(P.q))P.avg=nq===0?0:price;P.q=nq}
+ if(P.q===0)delete a.pos[s];
+}
+
+function order(s,dq,price){
+ if(mode==='real'){
+  if(!ws||ws.readyState!==1)return toast('Bridge desconectada: ordem NÃO enviada');
+  if($('cf').checked&&!confirm(`ORDEM REAL\n${dq>0?'COMPRA':'VENDA'} ${Math.abs(dq)} ${s} ${price?'LIMITE @ '+price:'A MERCADO'}`))return;
+  ws.send(JSON.stringify({action:'order',symbol:s,side:dq>0?'BUY':'SELL',qty:Math.abs(dq),type:price?'LIMIT':'MARKET',price:price||null}));
+  return toast('Ordem real enviada à bridge');
+ } else {
+  if(price) ACC.sim.ord.push({s,q:dq,p:price});
+  else fill(ACC.sim, s, dq, px[s]);
+  ui();
+  drawAll();
+  return toast('[Demo] Ordem simulada na plataforma (catalogação)');
+ }
+}
+
+function send(sd){
+ const rawLot = $('lot').value.replace(',', '.');
+ const q = Math.max(0.01, parseFloat(rawLot) || 1);
+ const lim = $('ot').value==='l';
+ const pr = parseFloat($('lpx').value);
+ if(lim && !(pr>0)) return toast('Informe o preço limite');
+ order(act.sym, sd * q, lim ? pr : null);
+}
+
+function zero(){const P=A().pos[act.sym];if(P&&P.q)order(act.sym,-P.q,null)}
+function cancel(){
+ const s=act.sym;
+ if(mode==='real'){
+  if(ws&&ws.readyState!==1)ws.send(JSON.stringify({action:'cancel',symbol:s}))
+ }else {
+  ACC.sim.ord=ACC.sim.ord.filter(o=>o.s!==s);
+  toast('Ordens simuladas canceladas');
+ }
+ ui();drawAll();
+}
+
+$('bBuy').onclick=()=>send(1);
+$('bSell').onclick=()=>send(-1);
+$('bCan').onclick=cancel;
+$('bZ').onclick=zero;
+$('bZC').onclick=()=>{cancel();zero()};
+$('bRev').onclick=()=>{const P=A().pos[act.sym];if(P&&P.q)order(act.sym,-2*P.q,null)};
+$('ot').onchange=()=>{const l=$('ot').value==='l';$('lpx').style.display=l?'block':'none';$('lpx').value=fp(act.sym,px[act.sym]);$('bBuy').textContent=l?'Comprar Limite':'Comprar';$('bSell').textContent=l?'Vender Limite':'Vender'};
+
+function updateMt5Status(connected) {
+ const b = $('mt5Badge');
+ if (!b) return;
+ if (connected) {
+  b.textContent = 'MT5 Conectado';
+  b.style.background = '#059669';
+ } else {
+  b.textContent = 'MT5 Desconectado';
+  b.style.background = '#dc2626';
+ }
+}
+
+function connectBridge(){
+ const wsUrl = 'ws://127.0.0.1:8765';
+ console.log("[DIAGNÓSTICO] A tentar ligar automaticamente ao WebSocket em:", wsUrl);
+
+ if(ws) {
+  try { ws.close(); } catch(e) {}
+ }
+ 
+ try {
+  ws = new WebSocket(wsUrl);
+ } catch(err) {
+  console.error("[DIAGNÓSTICO] Erro ao criar WebSocket:", err);
+  return;
+ }
+ 
+ ws.onopen = () => {
+  console.log("[DIAGNÓSTICO] Ligação WebSocket estabelecida com sucesso!");
+  updateMt5Status(true);
+  ws.send(JSON.stringify({action: 'get_symbols'}));
+ };
+ 
+ ws.onclose = (event) => {
+  console.warn("[DIAGNÓSTICO] Ligação WebSocket fechada. A tentar reconectar em 3 segundos...", event);
+  updateMt5Status(false);
+  setTimeout(connectBridge, 3000);
+ };
+
+ ws.onerror = (error) => {
+  console.error("[DIAGNÓSTICO] Erro no WebSocket:", error);
+  updateMt5Status(false);
+ };
+ 
+ ws.onmessage = e => {
+  let m; 
+  try { 
+   m = JSON.parse(e.data); 
+  } catch(x) { 
+   console.error("Erro ao interpretar JSON:", x);
+   return; 
+  }
+
+  if(m.type === 'symbols'){
+   Object.assign(SYMS, m.symbols);
+   for(const k in m.symbols) {
+    if(!px[k]) px[k] = m.symbols[k].b;
+   }
+   toast(`Ativos carregados do MT5 com sucesso!`);
+   panes.forEach(p => {
+    ws.send(JSON.stringify({action: 'get_history', symbol: p.sym, tf: p.tf}));
+   });
+   if(panes.length === 0 && Object.keys(SYMS).length > 0) {
+    const firstKey = Object.keys(SYMS)[0];
+    addPane(firstKey, 5);
+   }
+  }
+  else if(m.type === 'history'){
+   const pane = panes.find(p => p.sym.toUpperCase() === m.symbol.toUpperCase() && p.tf === m.tf);
+   if(pane && m.candles && m.candles.length > 0) {
+    pane.cs = m.candles;
+    px[m.symbol] = m.candles[m.candles.length - 1].c;
+    draw(pane);
+   }
+  }
+  else if(m.type === 'tick'){
+   const foundKey = Object.keys(SYMS).find(k => k.toUpperCase() === m.symbol.toUpperCase());
+   if(foundKey) {
+    px[foundKey] = m.price;
+    feedTick(foundKey, m.price, m.time || Date.now());
+   }
+  }
+  else if(m.type === 'position'){
+   if(m.qty) ACC.real.pos[m.symbol] = {q: m.qty, avg: m.avg};
+   else delete ACC.real.pos[m.symbol];
+   ui();
+   drawAll();
+  }
+  else if(m.type === 'realized'){
+   ACC.real.rl = m.value;
+   ui();
+  }
+  else if(m.type === 'msg'){
+   toast(m.text);
+  }
+ };
+}
+
+const wsbBtn = $('wsb');
+if(wsbBtn) wsbBtn.onclick = connectBridge;
+
+$('mode').onchange=()=>{
+ const v=$('mode').value;
+ mode=v;
+ const r=(v==='real');
+ $('mb').textContent=r?'MT5':'Simulação';
+ $('mb').className='badge'+(r?' real':'');
+ $('side').classList.toggle('realm',r);
+ ui();
+ drawAll();
+};
+
+function feedTick(sym, price, tTime){
+ panes.forEach(p => {
+  if(p.sym.toUpperCase() !== sym.toUpperCase()) return;
+  if(!p.cs || p.cs.length === 0) return;
+  const l = p.cs[p.cs.length - 1];
+  const per = p.tf * 60 * 1000;
+  const candleTime = Math.floor(tTime / per) * per;
+
+  if (candleTime > l.t) {
+   p.cs.push({
+    t: candleTime,
+    o: l.c,
+    h: Math.max(l.c, price),
+    l: Math.min(l.c, price),
+    c: price
+   });
+   if(p.cs.length > 1500) p.cs.shift();
+  } else {
+   l.c = price;
+   l.h = Math.max(l.h, price);
+   l.l = Math.min(l.l, price);
+  }
+ });
+
+ const a=ACC.sim;
+ a.ord=a.ord.filter(o=>{
+  const P=px[o.s];
+  if(P && (o.q>0?P<=o.p:P>=o.p)){
+   fill(a,o.s,o.q,o.p);
+   toast(`[Demo] Limite executada: ${o.q>0?'C':'V'} ${Math.abs(o.q)} ${o.s} @ ${fp(o.s,o.p)}`);
+   return false;
+  }
+  return true;
+ });
+ drawAll();
+ ui();
+}
+
+function ui(){
+ const p=act;
+ if(!p)return;
+ const a=A(),s=p.sym,P=a.pos[s]||{q:0,avg:0};
+ const symName = SYMS[s] ? SYMS[s].n : s;
+ $('sSym').innerHTML=s+'<small>'+symName+'</small>';
+ 
+ const posBox = $('posBox');
+ if(posBox) {
+  posBox.textContent = P.q === 0 ? 'ZERADO' : (P.q > 0 ? 'COMPRADO ' : 'VENDIDO ') + Math.abs(P.q);
+  posBox.className = P.q > 0 ? 'up' : (P.q < 0 ? 'dn' : '');
+ }
+
+ const pv = SYMS[s] ? SYMS[s].pv : 1;
+ const op=(px[s]-P.avg)*P.q*pv;let tot=a.rl,rows='';
+ for(const k in a.pos){const x=a.pos[k],v=(px[k]-x.avg)*x.q*(SYMS[k]?SYMS[k].pv:1);tot+=v;
+  rows+=`<div data-k="${k}"><span>${k} <b class="${x.q>0?'up':'dn'}">${x.q>0?'C':'V'} ${Math.abs(x.q)}</b></span><span class="${v>=0?'up':'dn'}">${money(v)}</span></div>`}
+ $('pt').innerHTML=rows||'<span style="color:#64748b">Nenhuma</span>';
+ $('rAvg').textContent=P.q?fp(s,P.avg):'-';
+ const set=(id,v)=>{$(id).textContent=money(v);$(id).className=v>=0?'up':'dn'};set('rOp',op);set('rDia',a.rl);set('rTot',tot);
+ panes.forEach(x=>{const q=(a.pos[x.sym]||{q:0}).q,h=x.el.querySelector('.ph');h.children[0].textContent=x.sym;h.children[1].textContent=x.tf+'M';
+  const c=h.children[2];c.textContent=q?(q>0?'C ':'V ')+Math.abs(q):'';c.className='chip '+(q>0?'up':q<0?'dn':'')});
+ const l=p.cs[p.cs.length-1];if(l){$('vo').textContent=fp(s,l.o);$('vh').textContent=fp(s,l.h);$('vl').textContent=fp(s,l.l);$('vc').textContent=fp(s,l.c);$('vc').className=l.c>=l.o?'up':'dn'}
+}
+$('pt').onclick=e=>{const d=e.target.closest('[data-k]');if(d)setSym(act,d.dataset.k)};
+
+$('tCursor').onclick = () => setActiveTool('cursor');
+$('tHand').onclick = () => setActiveTool('hand');
+$('tCross').onclick = () => setActiveTool('cross');
+$('tRuler').onclick = () => setActiveTool('ruler');
+$('tFibo').onclick = () => { setActiveTool('fibo'); toast('Fibonacci selecionada'); };
+
+function setActiveTool(tool) {
+ activeTool = tool;
+ document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
+ if(tool === 'cursor') $('tCursor').classList.add('active');
+ if(tool === 'hand') $('tHand').classList.add('active');
+ if(tool === 'cross') $('tCross').classList.add('active');
+ if(tool === 'ruler') $('tRuler').classList.add('active');
+ if(tool === 'fibo') $('tFibo').classList.add('active');
+
+ panes.forEach(p => {
+  if (tool === 'hand') p.cv.style.cursor = 'grab';
+  else if (tool === 'cross') p.cv.style.cursor = 'crosshair';
+  else p.cv.style.cursor = 'default';
+ });
+}
+
+let sel=0,list=[];
+function openSearch(ch,nw,e){
+ if(e && e.preventDefault) e.preventDefault();
+ newMode=!!nw;
+ $('so').style.display='block';
+ $('si').value=ch;
+ $('si').focus();
+ rs();
+}
+function closeSearch(){$('so').style.display='none';$('si').blur()}
+function closeTimeframe(){$('tfo').style.display='none';tfb=''}
+
+function rs(){
+ const q=$('si').value.toUpperCase().trim();
+ list=Object.keys(SYMS).filter(k=>k.includes(q)||(SYMS[k].n&&SYMS[k].n.toUpperCase().includes(q))).slice(0,80);
+ sel=0;
+ let html = list.map((k,i)=>`<div class="si${i?'':' on'}" data-k="${k}"><b>${k}</b><span>${SYMS[k].n}</span></div>`).join('');
+ if (!html && q) {
+  html = `<div class="si on" data-k="${q}"><b>${q}</b><span>Ativo dinâmico (Carregar)</span></div>`;
+  list = [q];
+ }
+ $('sr').innerHTML=html;
+}
+
+function pick(k,nw){
+ if(!k)return;
+ k = ensureSymbol(k);
+ if(!k) return;
+ closeSearch();
+ if(nw||newMode||!act)addPane(k);else setSym(act,k);
+}
+
+$('si').addEventListener('input',rs);
+$('si').addEventListener('keydown',e=>{
+ const query = $('si').value.trim();
+ const it=$('sr').children;
+ if(e.key==='ArrowDown'||e.key==='ArrowUp'){
+  e.preventDefault();
+  if(list.length){
+   sel=(sel+(e.key==='ArrowDown'?1:-1)+list.length)%list.length;
+   [...it].forEach((x,i)=>x.classList.toggle('on',i===sel));
+  }
+ }
+ else if(e.key==='Enter'){
+  e.preventDefault();
+  const targetCode = list[sel] || query;
+  if(targetCode) pick(targetCode, e.shiftKey);
+ }
+ else if(e.key==='Escape') closeSearch();
+});
+
+$('sr').onclick=e=>{const d=e.target.closest('[data-k]');if(d)pick(d.dataset.k)};
+$('bAdd').onclick=(e)=>openSearch('',true,e);
+
+let tfb='',tft=null;
+function tfOk(){clearTimeout(tft);if(tfb){const v=parseInt(tfb);if(v>0&&v<=1440&&act)setTf(act,v)}closeTimeframe()}
+
+addEventListener('keydown',e=>{
+ if(['INPUT','SELECT'].includes(e.target.tagName))return;
+ 
+ if (e.key === 'Control') {
+  if (activeTool === 'hand') {
+   setActiveTool('cursor');
+   toast('Modo Mãozinha Desativado');
+  } else {
+   setActiveTool('hand');
+   toast('Modo Mãozinha Ativado (Ctrl)');
+  }
+  return;
+ }
+
+ if(e.ctrlKey||e.metaKey||e.altKey)return;
+ if(/^[a-zA-Z]$/.test(e.key)) {
+  openSearch(e.key.toUpperCase(), false, e);
+ }
+ else if(/^[0-9]$/.test(e.key)&&tfb.length<4){tfb+=e.key;$('tft').textContent=tfb;$('tfo').style.display='block';clearTimeout(tft);tft=setTimeout(tfOk,1500)}
+ else if(e.key==='Enter'&&tfb)tfOk();
+ else if(e.key==='Escape'){closeTimeframe();closeSearch()}});
+
+new ResizeObserver(drawAll).observe($('grid'));
+
+// Conexão automática imediata com a Bridge em segundo plano
+setTimeout(() => {
+ connectBridge();
+}, 200);

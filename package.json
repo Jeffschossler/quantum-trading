@@ -1,0 +1,40 @@
+{
+  "name": "quantum-trading",
+  "version": "1.0.0",
+  "description": "Plataforma Quantum Trading",
+  "author": "Jeffschossler",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win nsis",
+    "publish": "electron-builder --win nsis -p always"
+  },
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.0"
+  },
+  "dependencies": {
+    "electron-updater": "^6.1.7"
+  },
+  "build": {
+    "appId": "com.quantum.trading",
+    "productName": "Quantum Trading",
+    "publish": {
+      "provider": "github",
+      "owner": "Jeffschossler",
+      "repo": "quantum-trading"
+    },
+    "win": {
+      "target": "nsis",
+      "signAndEditExecutable": false
+    },
+    "files": [
+      "index.html",
+      "app.js",
+      "style.css",
+      "indicators.js",
+      "dock.js",
+      "main.js"
+    ]
+  }
+}
